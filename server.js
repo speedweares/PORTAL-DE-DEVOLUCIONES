@@ -23,7 +23,7 @@ app.get("/", (_, res) => {
 });
 
 // ─────────────────────────────────────────────
-// ✅ Verificación firma APP PROXY (Shopify)
+// ✅ Verificación firma APP PROXY
 // ─────────────────────────────────────────────
 function isValidProxy(req) {
   const signature = req.query?.signature;
@@ -51,9 +51,8 @@ function isValidProxy(req) {
 // Helper Shopify GraphQL
 // ─────────────────────────────────────────────
 async function shopifyGraphQL(query, variables = {}) {
-  if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+  if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN)
     throw new Error("SHOPIFY_ENV_MISSING");
-  }
 
   const res = await fetch(
     `https://${SHOPIFY_SHOP}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
@@ -82,7 +81,17 @@ app.get(`${APP_PROXY_SUBPATH}/health`, (_, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 🔎 LOOKUP REAL (pedido + email) 🔥
+// ✅ GET /lookup → evita "Cannot GET"
+// ─────────────────────────────────────────────
+app.get(`${APP_PROXY_SUBPATH}/lookup`, (req, res) => {
+  res
+    .status(405)
+    .type("application/json")
+    .send(JSON.stringify({ error: "METHOD_NOT_ALLOWED", hint: "Use POST with JSON body" }));
+});
+
+// ─────────────────────────────────────────────
+// 🔎 LOOKUP REAL (pedido y email)
 // ─────────────────────────────────────────────
 app.post(`${APP_PROXY_SUBPATH}/lookup`, async (req, res) => {
   const start = Date.now();
@@ -94,71 +103,59 @@ app.post(`${APP_PROXY_SUBPATH}/lookup`, async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanNumber = String(orderNumber).replace("#", "").trim();
 
-    if (!cleanEmail || !cleanNumber) {
+    if (!cleanEmail || !cleanNumber)
       return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
 
-    // Probamos varias queries porque Shopify a veces no indexa igual
     const queries = [
       `(name:#${cleanNumber} OR name:${cleanNumber}) AND (email:${cleanEmail} OR customer_email:${cleanEmail})`,
       `(name:"#${cleanNumber}" OR name:"${cleanNumber}") AND (email:${cleanEmail} OR customer_email:${cleanEmail})`,
       `(name:#${cleanNumber} OR name:${cleanNumber})`,
-      `(name:"#${cleanNumber}" OR name:"${cleanNumber}")`
+      `(name:"#${cleanNumber}" OR name:"${cleanNumber}")`,
     ];
 
     let order = null;
-    let lastError = null;
 
     for (const q of queries) {
-      try {
-        const data = await shopifyGraphQL(
-          `query($q:String!){
-            orders(first:5, query:$q){
-              edges{
-                node{
-                  id name email currencyCode
-                  customer { email }
-                  lineItems(first:100){
-                    edges{
-                      node{
-                        id
-                        quantity
-                        refundableQuantity
-                        title
-                        sku
-                        originalUnitPriceSet{ presentmentMoney{ amount currencyCode } }
-                        variant{ id title image{ url } product{ id title } }
-                      }
+      const data = await shopifyGraphQL(
+        `query($q:String!){
+          orders(first:5, query:$q){
+            edges{
+              node{
+                id name email currencyCode
+                customer { email }
+                lineItems(first:100){
+                  edges{
+                    node{
+                      id
+                      quantity
+                      refundableQuantity
+                      title
+                      sku
+                      originalUnitPriceSet{ presentmentMoney{ amount currencyCode } }
+                      variant{ id title image{ url } product{ id title } }
                     }
                   }
                 }
               }
             }
-          }`,
-          { q }
-        );
+          }
+        }`,
+        { q }
+      );
 
-        const candidates = (data?.orders?.edges || []).map((e) => e.node);
-        order = candidates.find(
-          (n) =>
-            n.email?.toLowerCase().trim() === cleanEmail ||
-            n.customer?.email?.toLowerCase().trim() === cleanEmail
-        ) || candidates[0];
+      const candidates = (data?.orders?.edges || []).map((e) => e.node);
 
-        if (order) break;
-      } catch (e) {
-        lastError = e;
-      }
+      order = candidates.find(
+        (n) =>
+          n.email?.toLowerCase().trim() === cleanEmail ||
+          n.customer?.email?.toLowerCase().trim() === cleanEmail
+      ) || candidates[0];
+
+      if (order) break;
     }
 
-    if (!order) {
-      console.error("❌ LOOKUP_NOT_FOUND", {
-        email: cleanEmail,
-        number: cleanNumber,
-        lastError,
-      });
+    if (!order)
       return res.status(404).json({ error: "ORDER_NOT_FOUND_OR_EMAIL_MISMATCH" });
-    }
 
     const lineItems = order.lineItems.edges.map(({ node }) => {
       const price = Number(node.originalUnitPriceSet?.presentmentMoney?.amount ?? 0);
@@ -175,38 +172,37 @@ app.post(`${APP_PROXY_SUBPATH}/lookup`, async (req, res) => {
       };
     });
 
-    console.log("✅ LOOKUP_OK", {
-      order: order.name,
-      email: order.email || order.customer?.email,
-      time_ms: Date.now() - start,
-    });
-
-    res.json({
+    return res.json({
       orderId: order.id,
       currency: order.currencyCode,
       lineItems,
     });
   } catch (e) {
-    console.error("LOOKUP_ERROR", e, { time_ms: Date.now() - start });
+    console.error("LOOKUP_ERROR", e);
     res.status(500).send("LOOKUP_ERROR");
   }
 });
 
 // ─────────────────────────────────────────────
-// 🧪 TEST LOOKUP desde navegador (sin front)
-// https://domain.up.railway.app/apps/returns/test-lookup?email=...&n=7518
+// 🧪 TEST LOOKUP (GET) desde navegador
 // ─────────────────────────────────────────────
+// Ejemplo:
+// https://tuapp.up.railway.app/apps/returns/test-lookup?email=correo&n=7518
 app.get(`${APP_PROXY_SUBPATH}/test-lookup`, async (req, res) => {
   try {
     const email = String(req.query.email || "").trim();
     const n = String(req.query.n || "").trim();
-    if (!email || !n) return res.status(400).json({ error: "Use ?email=...&n=7518" });
+    if (!email || !n)
+      return res.status(400).json({ error: "Use ?email=...&n=7518" });
 
-    const r = await fetch(`${req.protocol}://${req.get("host")}${APP_PROXY_SUBPATH}/lookup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, orderNumber: `#${n}` }),
-    });
+    const r = await fetch(
+      `${req.protocol}://${req.get("host")}${APP_PROXY_SUBPATH}/lookup`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, orderNumber: `#${n}` }),
+      }
+    );
 
     const text = await r.text();
     res.status(r.status).type("application/json").send(text);
@@ -250,7 +246,7 @@ app.post(`${APP_PROXY_SUBPATH}/exchange-options`, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-//✳️ CREATE (por ahora mock → devuelve etiqueta PDF de prueba)
+// ✳️ CREATE (mock – etiqueta PDF temporal)
 // ─────────────────────────────────────────────
 app.post(`${APP_PROXY_SUBPATH}/create`, (req, res) => {
   if (!isValidProxy(req)) return res.status(401).send("Bad signature");
