@@ -2,8 +2,9 @@
 
 Backend mínimo para portal de devoluciones/cambios:
 - App Proxy: `/apps/returns`
-- Shopify Admin API (GraphQL)
+- Shopify Admin API (GraphQL) con logs detallados
 - Endpoints: lookup (real), exchange-options (real), create (mock)
+- Utilidades de diagnóstico: /debug, /self-test, /test-lookup
 
 ## Deploy en Railway
 1) Conecta el repo en Railway → Deploy
@@ -22,10 +23,16 @@ Backend mínimo para portal de devoluciones/cambios:
 - Proxy URL: `https://tu-app.up.railway.app`
 - Secret: `shpss_...`
 
-## Endpoints
-- `POST /apps/returns/lookup` — body: `{ "email": "...", "orderNumber": "#1234" }`
-- `GET  /apps/returns/test-lookup?email=...&n=1234` — test desde navegador
-- `POST /apps/returns/exchange-options` — body: `{ "productId": "...", "currentVariantId": "..." }`
-- `POST /apps/returns/create` — mock (devuelve etiqueta PDF de prueba)
+## Endpoints principales
+- `POST /apps/returns/lookup`
+  - Body: `{ "email": "...", "orderNumber": "#1234" }`
+- `GET  /apps/returns/test-lookup?email=...&n=1234`
+  - Prueba desde navegador (llama internamente al POST)
+- `GET  /apps/returns/self-test?email=...&n=1234`
+  - Diagnóstico completo: token, tienda, búsqueda por número y validación de email
+- `POST /apps/returns/exchange-options`
+  - Body: `{ "productId": "...", "currentVariantId": "..." }`
+- `POST /apps/returns/create`
+  - Mock: devuelve etiqueta PDF de prueba
 
-> No subas tokens al repo. Configúralos solo como Variables en Railway.
+> ⚠️ No subas tokens al repo. Configúralos solo como Variables en Railway.

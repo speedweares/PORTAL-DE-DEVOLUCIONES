@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import crypto from "crypto";
-import fetch from "node-fetch"; // compat universal
+import fetch from "node-fetch"; // compat universal (Node 18+ ok)
 
 const app = express();
 app.use(express.json());
@@ -33,7 +33,7 @@ function isValidProxy(req) {
   }
 }
 
-// Helper Shopify GraphQL con logs de error buenos
+// --- Helper Shopify GraphQL (diagnóstico detallado) ---
 async function shopifyGraphQL(query, variables = {}) {
   if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) throw new Error("SHOPIFY_ENV_MISSING");
 
@@ -43,32 +43,27 @@ async function shopifyGraphQL(query, variables = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
       },
-      body: JSON.stringify({ query, variables })
+      body: JSON.stringify({ query, variables }),
     });
-  } catch (netErr) {
-    console.error("❌ NETWORK_ERROR to Shopify:", netErr?.message || netErr);
-    throw new Error("NETWORK_ERROR");
+  } catch (e) {
+    console.error("❌ NETWORK_ERROR", e?.message || e);
+    const err = new Error("NETWORK_ERROR"); err.code = "NETWORK_ERROR"; throw err;
   }
 
   const text = await res.text();
   if (!res.ok) {
     console.error("❌ SHOPIFY_HTTP_ERROR", res.status, text.slice(0, 500));
-    throw new Error(`SHOPIFY_${res.status}`);
+    const err = new Error(`SHOPIFY_${res.status}`); err.code = `SHOPIFY_${res.status}`; err.payload = text; throw err;
   }
 
   let json;
   try { json = JSON.parse(text); }
-  catch (e) {
-    console.error("❌ JSON_PARSE_ERROR", text.slice(0, 300));
-    throw new Error("JSON_PARSE_ERROR");
-  }
+  catch (e) { console.error("❌ JSON_PARSE_ERROR", text.slice(0, 300)); const err = new Error("JSON_PARSE_ERROR"); err.code="JSON_PARSE_ERROR"; throw err; }
 
-  if (json.errors) {
-    console.error("❌ SHOPIFY_GQL_ERRORS", json.errors);
-    throw new Error("SHOPIFY_GQL_ERRORS");
-  }
+  if (json.errors) { console.error("❌ SHOPIFY_GQL_ERRORS", json.errors); const err = new Error("SHOPIFY_GQL_ERRORS"); err.code="SHOPIFY_GQL_ERRORS"; err.payload=json.errors; throw err; }
+
   return json.data;
 }
 
@@ -118,45 +113,51 @@ app.post(`${APP_PROXY_SUBPATH}/lookup`, async (req, res) => {
     ];
 
     let order = null;
+    let lastError = null;
+
     for (const q of queries) {
-      const data = await shopifyGraphQL(
-        `query($q:String!){
-          orders(first:5, query:$q){
-            edges{
-              node{
-                id name email currencyCode
-                customer { email }
-                lineItems(first:100){
-                  edges{
-                    node{
-                      id
-                      quantity
-                      refundableQuantity
-                      title
-                      sku
-                      originalUnitPriceSet{ presentmentMoney{ amount currencyCode } }
-                      variant{ id title image{ url } product{ id title } }
+      try {
+        const data = await shopifyGraphQL(
+          `query($q:String!){
+            orders(first:5, query:$q){
+              edges{
+                node{
+                  id name email currencyCode
+                  customer { email }
+                  lineItems(first:100){
+                    edges{
+                      node{
+                        id
+                        quantity
+                        refundableQuantity
+                        title
+                        sku
+                        originalUnitPriceSet{ presentmentMoney{ amount currencyCode } }
+                        variant{ id title image{ url } product{ id title } }
+                      }
                     }
                   }
                 }
               }
             }
-          }
-        }`,
-        { q }
-      );
+          }`,
+          { q }
+        );
 
-      const candidates = (data?.orders?.edges || []).map(e => e.node);
-      order = candidates.find(n =>
-        (n.email && n.email.toLowerCase().trim() === cleanEmail) ||
-        (n.customer?.email && n.customer.email.toLowerCase().trim() === cleanEmail)
-      ) || candidates[0];
+        const candidates = (data?.orders?.edges || []).map(e => e.node);
+        order = candidates.find(n =>
+          (n.email && n.email.toLowerCase().trim() === cleanEmail) ||
+          (n.customer?.email && n.customer.email.toLowerCase().trim() === cleanEmail)
+        ) || candidates[0];
 
-      if (order) break;
+        if (order) break;
+      } catch (e) {
+        lastError = e;
+      }
     }
 
     if (!order) {
-      console.error("❌ LOOKUP_NOT_FOUND", { email: cleanEmail, number: cleanNumber });
+      console.error("❌ LOOKUP_NOT_FOUND", { email: cleanEmail, number: cleanNumber, lastError: lastError?.code || lastError?.message });
       return res.status(404).json({ error: "ORDER_NOT_FOUND_OR_EMAIL_MISMATCH" });
     }
 
@@ -183,8 +184,8 @@ app.post(`${APP_PROXY_SUBPATH}/lookup`, async (req, res) => {
 
     res.json({ orderId: order.id, currency: order.currencyCode, lineItems });
   } catch (e) {
-    console.error("LOOKUP_ERROR", e?.message || e, { time_ms: Date.now() - start });
-    res.status(500).send("LOOKUP_ERROR");
+    console.error("LOOKUP_ERROR", e?.code || e?.message || e, { time_ms: Date.now() - start });
+    res.status(500).json({ error: "LOOKUP_ERROR", code: e?.code || "UNKNOWN" });
   }
 });
 
@@ -206,6 +207,53 @@ app.get(`${APP_PROXY_SUBPATH}/test-lookup`, async (req, res) => {
     res.status(r.status).type("application/json").send(text);
   } catch (e) {
     res.status(500).json({ error: "TEST_LOOKUP_ERROR", message: e.message });
+  }
+});
+
+// --- SELF TEST: comprueba token, shop y búsqueda de pedido ---
+app.get(`${APP_PROXY_SUBPATH}/self-test`, async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    const n = String(req.query.n || "").replace("#","").trim();
+
+    // 1) ¿Token OK?
+    const who = await shopifyGraphQL(`{ shop { name myshopifyDomain } }`);
+
+    // 2) ¿Encuentra por número?
+    let reasons = [];
+    let foundNameOnly = null;
+    try {
+      const d = await shopifyGraphQL(
+        `query($q:String!){ orders(first:1, query:$q){ edges{ node{ id name email customer{ email } } } } }`,
+        { q: `(name:#${n} OR name:${n})` }
+      );
+      foundNameOnly = d.orders.edges[0]?.node || null;
+      if (!foundNameOnly) reasons.push("NO_ORDER_WITH_THAT_NUMBER");
+    } catch (e) {
+      reasons.push("ORDERS_QUERY_FAILED");
+    }
+
+    // 3) Validar email si hay pedido
+    let match = null;
+    if (foundNameOnly) {
+      const ok =
+        (foundNameOnly.email && foundNameOnly.email.toLowerCase().trim() === email) ||
+        (foundNameOnly.customer?.email && foundNameOnly.customer.email.toLowerCase().trim() === email);
+      if (ok) match = foundNameOnly;
+      else reasons.push("EMAIL_MISMATCH");
+    }
+
+    res.json({
+      ok: true,
+      shop: who.shop,
+      number: n,
+      email,
+      nameOnlyOrder: foundNameOnly,
+      matched: !!match,
+      reasons
+    });
+  } catch (e) {
+    res.status(500).json({ ok:false, code: e.code || "UNKNOWN", message: e.message });
   }
 });
 
@@ -235,7 +283,7 @@ app.post(`${APP_PROXY_SUBPATH}/exchange-options`, async (req, res) => {
 
     res.json({ variants });
   } catch (e) {
-    console.error("EXCHANGE_OPTIONS_ERROR", e?.message || e);
+    console.error("EXCHANGE_OPTIONS_ERROR", e?.code || e?.message || e);
     res.status(500).send("EXCHANGE_OPTIONS_ERROR");
   }
 });
