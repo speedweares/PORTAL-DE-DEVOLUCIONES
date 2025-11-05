@@ -12,7 +12,7 @@ const APP_PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "/apps/returns";
 const APP_PROXY_SECRET = process.env.APP_PROXY_SECRET || "";         // shpss_***
 const SHOPIFY_SHOP = process.env.SHOPIFY_SHOP;                       // tu-tienda.myshopify.com
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;       // shpat_***
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-04";
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
 
 // Ruta raíz (evita "Cannot GET /")
 app.get("/", (_, res) => {
